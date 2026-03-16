@@ -1,0 +1,41 @@
+[tool.poetry]
+version = "0.2.0"
+requires-poetry = ">=2.0.0,<3.0.0"
+packages = [
+    {include = "tmautils", from = "src"},
+]
+
+[tool.poetry.dependencies]
+python = "^3.13"
+
+[build-system]
+requires = ["poetry-core (>=2.0.0,<3.0.0)"]
+build-backend = "poetry.core.masonry.api"
+
+[project]
+name = "tmautils-enrich-ip"
+description = "IP enrichment utilities for tmautils"
+dynamic = ["version"]
+readme = "README.md"
+license = "MPL-2.0"
+authors = [
+    {name = "Yejin Cho", email = "i3pivigui@icloud.com"},
+    {name = "Sulyab Thottungal Valapu", email = "sulyabtv@gmail.com"},
+]
+requires-python = ">=3.13,<4.0"
+dependencies = [
+    "tmautils-core (>=0.2.0,<1.0.0)",
+    "pandas (>=2.3.0,<3.0.0)",
+    "requests (>=2.32.3,<3.0.0)",
+    "numpy (>=2.0.0,<3.0.0)",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest (>=9.0.0,<10.0.0)",
+    "pytest-asyncio (>=1.0.0,<2.0.0)",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
