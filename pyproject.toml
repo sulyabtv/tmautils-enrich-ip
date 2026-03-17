@@ -24,11 +24,14 @@ authors = [
 ]
 requires-python = ">=3.13,<4.0"
 dependencies = [
-    "tmautils-core (>=0.2.0,<1.0.0)",
+    "tmautils-core (>=0.2.0,<0.3.0)",
     "pandas (>=2.3.0,<3.0.0)",
     "requests (>=2.32.3,<3.0.0)",
     "numpy (>=2.0.0,<3.0.0)",
 ]
+
+[project.urls]
+Repository = "https://github.com/sulyabtv/tmautils-enrich-ip"
 
 [project.optional-dependencies]
 dev = [
