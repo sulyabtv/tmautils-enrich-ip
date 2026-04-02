@@ -4,12 +4,12 @@
 from typing import Optional
 from pathlib import Path
 from ipaddress import ip_address, ip_network, IPv4Address, IPv6Address
+import duckdb
 import pandas as pd
 import requests
 
 from tmautils.core import IOHelper
-from ._sqlite_storage import SqliteDatabase, SqliteTable
-from ._sqlite_helpers import SqliteLpmTrieHelper
+from tmautils.db.duckdb_helpers import DuckDbInetLpmIndex
 
 
 class VpnIpAz0:
@@ -305,6 +305,9 @@ class IpInfoPrivacyUtil:
     """
     Utility class for interacting with the ipinfo.io privacy dataset.
 
+    Uses DuckDB to load the CSV and DuckDbInetLpmIndex (PyTricia-based)
+    for fast in-memory longest-prefix-match lookups.
+
     Args:
         ipinfo_privacy_dir (Path):
             Directory where the ipinfo privacy dataset is stored.
@@ -325,7 +328,7 @@ class IpInfoPrivacyUtil:
             See the IOHelper class for more details.
     """
 
-    CSV_CHUNK_SIZE = 50_000
+    VALUE_COLS = ("hosting", "proxy", "tor", "relay", "vpn", "service")
 
     def __init__(
         self,
@@ -342,64 +345,40 @@ class IpInfoPrivacyUtil:
         kwargs.setdefault("raw_dir_symlink_to", ipinfo_privacy_dir)
         self.io_helper = IOHelper.init_with_dirs(
             self.__class__.__name__,
-            dirs={"raw", "processed", "logs"},
+            dirs={"raw", "logs"},
             working_root=working_root,
             **kwargs,
         )
 
-        # Raw and processed paths
         raw_path = self._locate_csv(date)
-        self.db_path = self.io_helper.processed / f"{raw_path.stem}.sqlite3"
-        is_initialized = self.db_path.exists()
 
-        # Initialize SqliteDatabase and register the table
-        self.db = SqliteDatabase(
-            self.db_path,
-            log_helper=self.io_helper.log_helper,
-        )
-        self.ipinfo_privacy_table: SqliteTable = self.db.register_table(
-            "ipinfo_privacy",
-            schema={
-                "version":          int,
-                "prefix_length":    int,
-                "network_start":    IPv6Address,
-                "network_end":      IPv6Address,
-                "hosting":          bool,
-                "proxy":            bool,
-                "tor":              bool,
-                "relay":            bool,
-                "vpn":              bool,
-                "service":          str,
-            },
-            qualifiers={
-                "version": "NOT NULL",
-                "prefix_length": "NOT NULL",
-                "network_start": "NOT NULL",
-                "network_end": "NOT NULL",
-            },
-            table_constraints=[
-                "PRIMARY KEY (version, network_start, prefix_length)"
-            ],
-            indices=[["version", "network_start", "network_end"]],
-        )
-        if not is_initialized:
-            self._populate_table(raw_path)
+        # Load CSV into DuckDB and build the LPM index
+        con = duckdb.connect(":memory:")
+        rel = con.sql(f"""
+            SELECT
+                network::INET::VARCHAR AS network,
+                hosting,
+                proxy,
+                tor,
+                relay,
+                vpn,
+                service
+            FROM read_csv('{raw_path}', auto_detect=true)
+        """)
 
-        # Use SqliteLpmTrieHelper for fast lookups
-        self.lpm_helper = SqliteLpmTrieHelper(
-            self.db.path,
-            self.ipinfo_privacy_table,
-            log_helper=self.io_helper.log_helper,
+        self.lpm_index = DuckDbInetLpmIndex.from_relation(
+            rel,
+            network_col="network",
+            value_cols=self.VALUE_COLS,
         )
+        con.close()
 
         self.io_helper.logger.info(
-            f"Initialized IpInfoPrivacyUtil with date: {date if date else 'latest'} "
-            f"and database at {self.db_path}"
+            f"Initialized IpInfoPrivacyUtil with date: {date if date else 'latest'}"
         )
 
     def _locate_csv(self, date: str | None = None):
         if date is not None:
-            # Verify that the date is in the ISO format 'YYYY-MM-DD'
             try:
                 pd.to_datetime(date, format="%Y-%m-%d", errors="raise")
             except ValueError:
@@ -408,7 +387,6 @@ class IpInfoPrivacyUtil:
                 )
                 raise
 
-            # Verify that the corresponding file exists
             raw_path = self.io_helper.raw / f"ipinfo_privacy.{date}.csv"
             if not raw_path.exists():
                 self.io_helper.logger.error(
@@ -417,7 +395,6 @@ class IpInfoPrivacyUtil:
                 raise FileNotFoundError(
                     f"Data file for date {date} not found.")
         else:
-            # List available data files
             data_files = list(self.io_helper.raw.glob("ipinfo_privacy.*.csv"))
             if not data_files:
                 self.io_helper.logger.error(
@@ -425,52 +402,15 @@ class IpInfoPrivacyUtil:
                 )
                 raise FileNotFoundError("No ipinfo privacy data files found.")
 
-            # Sort by date and take the most recent one
             data_files.sort(key=lambda x: x.stem.split('.')[-1], reverse=True)
             raw_path = data_files[0]
 
         return raw_path
 
-    def _populate_table(self, raw_path: Path):
-        # Stream the CSV in chunks, compute numeric columns, insert
-        self.io_helper.logger.info(
-            f"Populating SQLite database at {self.db_path}"
-        )
-        chunker = pd.read_csv(
-            raw_path,
-            dtype={
-                "hosting": bool,
-                "proxy":   bool,
-                "tor":     bool,
-                "relay":   bool,
-                "vpn":     bool,
-            },
-            chunksize=self.CSV_CHUNK_SIZE,
-        )
-        for df_chunk in chunker:
-            df_chunk: pd.DataFrame
-
-            net_objs = df_chunk.pop("network").map(lambda x: ip_network(x))
-            df_chunk["version"] = net_objs.map(lambda n: n.version)
-            df_chunk["prefix_length"] = net_objs.map(lambda n: n.prefixlen)
-            df_chunk["network_start"] = net_objs.map(
-                lambda n: n.network_address
-            )
-            df_chunk["network_end"] = net_objs.map(
-                lambda n: n.broadcast_address
-            )
-
-            # Write to the SQLite database
-            self.ipinfo_privacy_table.insert_df(df_chunk)
-
-        self.io_helper.logger.info(
-            "Created and populated SQLite database at {self.db_path}."
-        )
-
     def lookup(
         self,
         addr: IPv4Address | IPv6Address | str,
-    ) -> pd.Series:
+    ) -> dict[str, any]:
         """
         Lookup the privacy information for a given IP address.
 
@@ -479,14 +419,12 @@ class IpInfoPrivacyUtil:
                 The IP address to look up.
 
         Returns:
-            ret (pd.Series | None):
-                A pandas Series containing the privacy information for the given IP address,
-                or None if the address is not found in the dataset.
-                In original dataset, the columns are:
-                    - network, hosting, proxy, tor, relay, vpn, service
+            ret (dict[str, any]):
+                A dictionary containing the privacy information for the given IP address.
+                Keys: hosting, proxy, tor, relay, vpn, service.
+                If no match is found, all values will be None.
         """
-
-        return self.lpm_helper.lookup(addr)
+        return self.lpm_index.lookup_dict(addr)
 
     def is_ip_vpn(
         self,
@@ -504,15 +442,13 @@ class IpInfoPrivacyUtil:
                 A tuple where the first element is True if the IP is a VPN,
                 and the second element is the service name if available, otherwise None.
         """
-        ret = self.lookup(addr)
-        if not ret.empty:
-            if "vpn" in ret and ret["vpn"]:
-                # If 'service' is present, return it
-                if "service" in ret and pd.notna(ret["service"]):
-                    return True, ret["service"]
+        result = self.lpm_index.lookup(addr)
+        if result is not None:
+            # VALUE_COLS order: hosting, proxy, tor, relay, vpn, service
+            vpn_val = result[4]
+            if vpn_val:
+                service_val = result[5]
+                if service_val is not None:
+                    return True, service_val
                 return True, None
-        # If not found or not a VPN, return False
         return False, None
-
-    def get_all(self) -> pd.DataFrame:
-        return self.ipinfo_privacy_table.query_all()
