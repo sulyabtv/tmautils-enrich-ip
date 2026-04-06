@@ -9,7 +9,7 @@ import pandas as pd
 import requests
 
 from tmautils.core import IOHelper
-from tmautils.db.duckdb_helpers import DuckDbInetLpmIndex
+from tmautils.db import DuckDbInetLpmIndex
 
 
 class VpnIpAz0:
@@ -353,7 +353,7 @@ class IpInfoPrivacyUtil:
         raw_path = self._locate_csv(date)
 
         # Load CSV into DuckDB and build the LPM index
-        con = duckdb.connect(":memory:")
+        con = duckdb.connect()
         rel = con.sql(f"""
             SELECT
                 network::INET::VARCHAR AS network,
@@ -378,6 +378,7 @@ class IpInfoPrivacyUtil:
         )
 
     def _locate_csv(self, date: str | None = None):
+        # Verify that the date is in the ISO format 'YYYY-MM-DD'
         if date is not None:
             try:
                 pd.to_datetime(date, format="%Y-%m-%d", errors="raise")
@@ -387,6 +388,7 @@ class IpInfoPrivacyUtil:
                 )
                 raise
 
+            # Verify that the corresponding file exists
             raw_path = self.io_helper.raw / f"ipinfo_privacy.{date}.csv"
             if not raw_path.exists():
                 self.io_helper.logger.error(
@@ -395,6 +397,7 @@ class IpInfoPrivacyUtil:
                 raise FileNotFoundError(
                     f"Data file for date {date} not found.")
         else:
+            # List available data files
             data_files = list(self.io_helper.raw.glob("ipinfo_privacy.*.csv"))
             if not data_files:
                 self.io_helper.logger.error(
@@ -402,6 +405,7 @@ class IpInfoPrivacyUtil:
                 )
                 raise FileNotFoundError("No ipinfo privacy data files found.")
 
+            # Sort by date and take the most recent one
             data_files.sort(key=lambda x: x.stem.split('.')[-1], reverse=True)
             raw_path = data_files[0]
 
@@ -442,13 +446,5 @@ class IpInfoPrivacyUtil:
                 A tuple where the first element is True if the IP is a VPN,
                 and the second element is the service name if available, otherwise None.
         """
-        result = self.lpm_index.lookup(addr)
-        if result is not None:
-            # VALUE_COLS order: hosting, proxy, tor, relay, vpn, service
-            vpn_val = result[4]
-            if vpn_val:
-                service_val = result[5]
-                if service_val is not None:
-                    return True, service_val
-                return True, None
-        return False, None
+        result = self.lpm_index.lookup_dict(addr)
+        return bool(result.get("vpn")), result.get("service")
